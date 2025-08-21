@@ -70,6 +70,11 @@ function useSocket(sqid, setScoreboard) {
         setScoreboard(sb => ({ ...sb, ActiveSet: payload.setIndex }));
       }
     });
+    s.on('UpdateMatchLength', payload => {
+      if (typeof payload === 'number' && [3, 5].includes(payload)) {
+        setScoreboard(sb => ({ ...sb, MatchLength: payload }));
+      }
+    });
     s.on('UpdateTeamInfo', payload => {
       setScoreboard(sb => ({
         ...sb,
@@ -120,7 +125,8 @@ function ScoreView() {
   const [edit, setEdit] = useState({
     TeamName1: '', TeamName2: '', Tournament: '',
     TeamColor1: '#00adb5', TeamAccent1: '#007c85',
-    TeamColor2: '#ff6f3c', TeamAccent2: '#ffb26b'
+    TeamColor2: '#ff6f3c', TeamAccent2: '#ffb26b',
+    MatchLength: 3
   });
   const [showEdit, setShowEdit] = useState(false);
   const isDark = useColorScheme();
@@ -136,6 +142,7 @@ function ScoreView() {
       TeamAccent1: scoreboard.TeamAccent1 || '#007c85',
       TeamColor2: scoreboard.TeamColor2 || '#ff6f3c',
       TeamAccent2: scoreboard.TeamAccent2 || '#ffb26b',
+      MatchLength: scoreboard.MatchLength || 3
     });
   }, [scoreboard]);
 
@@ -159,6 +166,9 @@ function ScoreView() {
 
   const updateActiveSet = (setIdx) => {
     if (!scoreboard) return;
+    const matchLength = scoreboard.MatchLength || 3;
+    // Validate set index against match length
+    if (setIdx < 0 || setIdx >= matchLength) return;
     const updated = { ...scoreboard, ActiveSet: setIdx };
     setScoreboard(updated);
     fetch(`${API_BASE}/scoreboard/${sqid}`, {
@@ -168,10 +178,36 @@ function ScoreView() {
 
   const saveTeamInfo = () => {
     if (!scoreboard) return;
-    const updated = { ...scoreboard, ...edit };
-    setScoreboard(updated);
+    let updatedScoreboard = { ...scoreboard, ...edit };
+    
+    // Handle MatchLength changes
+    const currentMatchLength = scoreboard.MatchLength || 3;
+    const newMatchLength = edit.MatchLength || 3;
+    
+    if (currentMatchLength !== newMatchLength) {
+      const currentScores = scoreboard.Scores.split(',').map(Number);
+      let newScores;
+      
+      if (newMatchLength === 3 && currentMatchLength === 5) {
+        // Switching from 5 to 3 sets: truncate to first 6 values
+        newScores = currentScores.slice(0, 6);
+        // Reset ActiveSet if it's beyond 3-set range
+        if (scoreboard.ActiveSet > 2) {
+          updatedScoreboard.ActiveSet = 0;
+        }
+      } else if (newMatchLength === 5 && currentMatchLength === 3) {
+        // Switching from 3 to 5 sets: pad with zeros for sets 4 and 5
+        newScores = [...currentScores, 0, 0, 0, 0];
+      } else {
+        newScores = currentScores;
+      }
+      
+      updatedScoreboard.Scores = newScores.join(',');
+    }
+    
+    setScoreboard(updatedScoreboard);
     fetch(`${API_BASE}/scoreboard/${sqid}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updated)
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(updatedScoreboard)
     });
   };
 
@@ -208,7 +244,7 @@ function ScoreView() {
         {/* Material-style card for main controls */}
         <div style={{ background: 'var(--card)', borderRadius: 18, boxShadow: '0 2px 12px #00adb522', padding: 20, marginTop: 24, marginBottom: 16 }}>
           <div style={{ marginTop: 18, marginBottom: 0 }}>
-            {[0, 1, 2].map(setIdx => (
+            {Array.from({length: scoreboard.MatchLength || 3}, (_, setIdx) => (
               <div key={setIdx} style={{
                 border: scoreboard.ActiveSet === setIdx ? `2px solid var(--team1)` : '1px solid var(--border)',
                 borderRadius: 14,
@@ -362,6 +398,31 @@ function ScoreView() {
                   aria-label="Edit Tournament Name"
                   style={{ fontWeight: 500, fontSize: 15, border: 'none', borderBottom: '2px solid var(--team1)', outline: 'none', background: 'var(--input-bg)', minWidth: 120, color: 'var(--text)', marginBottom: 10 }}
                 />
+                <div style={{ marginBottom: 10 }}>
+                  <label htmlFor="matchLength" style={{ fontSize: 14, color: 'var(--team1)', fontWeight: 600, display: 'block', marginBottom: 4 }}>
+                    Match Length:
+                  </label>
+                  <select 
+                    id="matchLength"
+                    value={edit.MatchLength || 3} 
+                    onChange={e => setEdit({...edit, MatchLength: parseInt(e.target.value)})}
+                    style={{ 
+                      fontSize: 15, 
+                      border: 'none', 
+                      borderBottom: '2px solid var(--team1)', 
+                      outline: 'none', 
+                      background: 'var(--input-bg)', 
+                      color: 'var(--text)',
+                      width: '100%',
+                      padding: '4px 0',
+                      fontWeight: 500
+                    }}
+                    aria-label="Select Match Length"
+                  >
+                    <option value={3}>Best of 3 Sets</option>
+                    <option value={5}>Best of 5 Sets</option>
+                  </select>
+                </div>
                 <button type="submit" style={{ background: 'var(--team1)', color: '#fff', border: 'none', borderRadius: 6, fontWeight: 700, fontSize: 15, padding: '10px 0', marginTop: 4, boxShadow: '0 1px 4px #00adb522' }}>Save</button>
                 <button
                   type="button"
@@ -380,7 +441,8 @@ function ScoreView() {
                   onClick={() => {
                     // Reset scores for all sets to 0 and activate Set 1
                     if (!scoreboard) return;
-                    const resetScores = '0,0,0,0,0,0';
+                    const matchLength = scoreboard.MatchLength || 3;
+                    const resetScores = Array(matchLength * 2).fill(0).join(',');
                     const updated = { ...scoreboard, Scores: resetScores, ActiveSet: 0 };
                     setScoreboard(updated);
                     fetch(`${API_BASE}/scoreboard/${sqid}`, {
@@ -423,9 +485,9 @@ function OverlayView() {
   const [sweepKey, setSweepKey] = useState(0);
   const [sweepEasing, setSweepEasing] = useState('cubic-bezier(0.4,0,0.2,1)');
 
-  // Animation state for scores
-  const [scoreAnim, setScoreAnim] = useState([null, null, null, null, null, null]); // {prev, next, dir}
-  const prevScoresRef = React.useRef([0, 0, 0, 0, 0, 0]);
+  // Animation state for scores (support up to 5 sets = 10 scores)
+  const [scoreAnim, setScoreAnim] = useState([null, null, null, null, null, null, null, null, null, null]); // {prev, next, dir}
+  const prevScoresRef = React.useRef([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
 
   useEffect(() => {
     fetch(`${API_BASE}/scoreboard/${sqid}`)
@@ -465,15 +527,17 @@ function OverlayView() {
     if (!scoreboard) return;
     const scores = scoreboard.Scores.split(',').map(Number);
     const prev = prevScoresRef.current;
-    let animArr = [null, null, null, null, null, null];
-    for (let i = 0; i < 6; ++i) {
+    const matchLength = scoreboard.MatchLength || 3;
+    const maxScores = matchLength * 2; // 2 scores per set
+    let animArr = [null, null, null, null, null, null, null, null, null, null];
+    for (let i = 0; i < maxScores; ++i) {
       if (scores[i] !== prev[i]) {
         animArr[i] = { prev: prev[i], next: scores[i], dir: scores[i] > prev[i] ? 1 : -1 };
       }
     }
     setScoreAnim(animArr);
     if (animArr.some(Boolean)) {
-      setTimeout(() => setScoreAnim([null, null, null, null, null, null]), 350);
+      setTimeout(() => setScoreAnim([null, null, null, null, null, null, null, null, null, null]), 350);
     }
     prevScoresRef.current = scores;
   }, [scoreboard && scoreboard.Scores]);
@@ -575,10 +639,12 @@ function OverlayView() {
             overflow: 'hidden',
             gap: 0,
           }}>
-            {[0, 1, 2].map((setIdx, arrIdx, arr) => {
-              const team1Score = scores[setIdx * 2];
-              const team2Score = scores[setIdx * 2 + 1];
-              const setTarget = setIdx === 2 ? 15 : 25;
+            {Array.from({length: scoreboard.MatchLength || 3}, (_, setIdx) => {
+              const arrIdx = setIdx;
+              const arr = Array.from({length: scoreboard.MatchLength || 3});
+              const team1Score = scores[setIdx * 2] || 0;
+              const team2Score = scores[setIdx * 2 + 1] || 0;
+              const setTarget = setIdx === (scoreboard.MatchLength - 1) ? 15 : 25;
               // Determine if either team has won the set
               let team1Won = false, team2Won = false;
               if (
@@ -620,7 +686,7 @@ function OverlayView() {
                       justifyContent: 'center',
                       minWidth: 0,
                       flex: '1 1 0',
-                      maxWidth: '33.33%', // Each set max 1/3 of set region
+                      maxWidth: scoreboard.MatchLength === 5 ? '20%' : '33.33%', // Each set max 1/5 for 5-set, 1/3 for 3-set
                       overflow: 'hidden',
                       padding: 0,
                     }}
@@ -634,12 +700,12 @@ function OverlayView() {
                         width: '100%',
                         overflow: 'hidden',
                         flex: '1 1 0',
-                        fontSize: '2em', // Reduced font size from 2.6em to 2em
+                        fontSize: scoreboard.MatchLength === 5 ? '1.8em' : '2em', // Smaller font for 5-set matches
                         fontWeight: 800,
                         lineHeight: 1.1,
                       }}
                     >
-                      <span className="score-anim-wrap" style={{ display: 'inline-block', overflow: 'hidden', width: '2.2em', height: '1.2em', verticalAlign: 'middle', textAlign: 'center', position: 'relative', minWidth: 0 }}>
+                      <span className="score-anim-wrap" style={{ display: 'inline-block', overflow: 'hidden', width: scoreboard.MatchLength === 5 ? '2em' : '2.2em', height: '1.2em', verticalAlign: 'middle', textAlign: 'center', position: 'relative', minWidth: 0 }}>
                         {scoreAnim[setIdx*2] ? (
                           <>
                             <span className={`score-slide-out${scoreAnim[setIdx*2].dir === -1 ? ' reverse' : ''}`} style={{ display: 'block', width: '100%', ...((team1Won) ? { color: '#00ffae', fontWeight: 900, textShadow: '0 0 8px #00ffae88' } : {}) }}>{scoreAnim[setIdx*2].prev}</span>
@@ -650,7 +716,7 @@ function OverlayView() {
                         )}
                       </span>
                       <span className="overlay-score-sep" style={{ fontWeight: 700, fontSize: '1em', verticalAlign: 'middle', userSelect: 'none', minWidth: 0 }}>-</span>
-                      <span className="score-anim-wrap" style={{ display: 'inline-block', overflow: 'hidden', width: '2.2em', height: '1.2em', verticalAlign: 'middle', textAlign: 'center', position: 'relative', minWidth: 0 }}>
+                      <span className="score-anim-wrap" style={{ display: 'inline-block', overflow: 'hidden', width: scoreboard.MatchLength === 5 ? '2em' : '2.2em', height: '1.2em', verticalAlign: 'middle', textAlign: 'center', position: 'relative', minWidth: 0 }}>
                         {scoreAnim[setIdx*2+1] ? (
                           <>
                             <span className={`score-slide-out${scoreAnim[setIdx*2+1].dir === -1 ? ' reverse' : ''}`} style={{ display: 'block', width: '100%', ...((team2Won) ? { color: '#00ffae', fontWeight: 900, textShadow: '0 0 8px #00ffae88' } : {}) }}>{scoreAnim[setIdx*2+1].prev}</span>

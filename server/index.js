@@ -99,10 +99,18 @@ function validateScoreboardInput(body) {
   if (typeof body.Tournament !== 'string' || body.Tournament.length > 100) errors.push('Invalid Tournament');
   // BoardColor: hex string or empty
   if (body.BoardColor && !colorRe.test(body.BoardColor)) errors.push('Invalid BoardColor');
-  // Scores: comma-separated numbers, 6 values
-  if (typeof body.Scores !== 'string' || !/^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/.test(body.Scores)) errors.push('Invalid Scores');
-  // ActiveSet: 0, 1, or 2
-  if (![0,1,2].includes(body.ActiveSet)) errors.push('Invalid ActiveSet');
+  // MatchLength: 3 or 5 (default to 3 if not provided for backward compatibility)
+  const matchLength = body.MatchLength || 3;
+  if (![3, 5].includes(matchLength)) errors.push('Invalid MatchLength');
+  // Scores: comma-separated numbers, 6 values for 3-set, 10 values for 5-set
+  const expectedScoreCount = matchLength === 3 ? 6 : 10;
+  const scorePattern = matchLength === 3 
+    ? /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/
+    : /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/;
+  if (typeof body.Scores !== 'string' || !scorePattern.test(body.Scores)) errors.push('Invalid Scores');
+  // ActiveSet: validate against MatchLength (0 to matchLength-1)
+  const validActiveSets = Array.from({length: matchLength}, (_, i) => i);
+  if (!validActiveSets.includes(body.ActiveSet)) errors.push('Invalid ActiveSet');
   return errors;
 }
 
@@ -112,8 +120,11 @@ function isValidSqid(sqid) {
   return typeof sqid === 'string' && sqid.length >= SQIDS_MIN_LENGTH && /^[a-zA-Z0-9]+$/.test(sqid);
 }
 function isValidScores(scores) {
-  // Scores: comma-separated numbers, 6 values
-  return typeof scores === 'string' && /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/.test(scores);
+  // Scores: comma-separated numbers, 6 or 10 values (for 3-set or 5-set matches)
+  return typeof scores === 'string' && (
+    /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/.test(scores) ||
+    /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/.test(scores)
+  );
 }
 function isValidTeamInfo(obj) {
   const colorRe = /^#[0-9a-fA-F]{3,8}$/;
@@ -131,8 +142,13 @@ function isValidDisplay(obj) {
     typeof obj.tournament === 'string' && obj.tournament.length <= 100 &&
     (!obj.boardColor || colorRe.test(obj.boardColor));
 }
-function isValidSetIndex(idx) {
-  return [0, 1, 2].includes(idx);
+function isValidSetIndex(idx, matchLength = 3) {
+  // Validate set index against match length (0 to matchLength-1)
+  const validSets = Array.from({length: matchLength}, (_, i) => i);
+  return validSets.includes(idx);
+}
+function isValidMatchLength(matchLength) {
+  return [3, 5].includes(matchLength);
 }
 
 // REST API: Get scoreboard by Sqid
@@ -145,7 +161,14 @@ app.get('/api/scoreboard/:sqid', (req, res) => {
       return res.status(500).json({ error: err.message });
     }
     if (!row) return res.status(404).json({ error: 'Not found' });
-    res.json(row);
+    
+    // Ensure backward compatibility: set default MatchLength to 3 if not present
+    const result = { ...row };
+    if (result.MatchLength == null) {
+      result.MatchLength = 3;
+    }
+    
+    res.json(result);
   });
 });
 
@@ -153,10 +176,11 @@ app.get('/api/scoreboard/:sqid', (req, res) => {
 app.post('/api/scoreboard', (req, res) => {
   const errors = validateScoreboardInput(req.body);
   if (errors.length) return res.status(400).json({ error: errors.join(', ') });
-  const { TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet } = req.body;
+  const { TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, MatchLength } = req.body;
+  const matchLength = MatchLength || 3; // Default to 3 for backward compatibility
   db.run(
-    'INSERT INTO scoreboards (TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
-    [TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet],
+    'INSERT INTO scoreboards (TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, MatchLength) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    [TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, matchLength],
     function (err) {
       if (err) {
         console.error('POST /api/scoreboard error:', err);
@@ -174,10 +198,11 @@ app.put('/api/scoreboard/:sqid', (req, res) => {
   if (errors.length) return res.status(400).json({ error: errors.join(', ') });
   const id = sqids.decode(req.params.sqid)[0];
   if (!id) return res.status(404).json({ error: 'Invalid Sqid' });
-  const { TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet } = req.body;
+  const { TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, MatchLength } = req.body;
+  const matchLength = MatchLength || 3; // Default to 3 for backward compatibility
   db.run(
-    'UPDATE scoreboards SET TeamName1=?, TeamName2=?, TeamColor1=?, TeamAccent1=?, TeamColor2=?, TeamAccent2=?, Tournament=?, BoardColor=?, Scores=?, ActiveSet=? WHERE ScoreboardId=?',
-    [TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, id],
+    'UPDATE scoreboards SET TeamName1=?, TeamName2=?, TeamColor1=?, TeamAccent1=?, TeamColor2=?, TeamAccent2=?, Tournament=?, BoardColor=?, Scores=?, ActiveSet=?, MatchLength=? WHERE ScoreboardId=?',
+    [TeamName1, TeamName2, TeamColor1, TeamAccent1, TeamColor2, TeamAccent2, Tournament, BoardColor, Scores, ActiveSet, matchLength, id],
     function (err) {
       if (err) {
         console.error('PUT /api/scoreboard/:sqid error:', err);
@@ -185,14 +210,18 @@ app.put('/api/scoreboard/:sqid', (req, res) => {
       }
       // Emit socket events for real-time update
       const sqid = req.params.sqid;
-      // Emit scores
-      if (typeof Scores === 'string' && /^\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2},\d{1,2}$/.test(Scores)) {
+      // Emit scores (updated validation for both 6 and 10 values)
+      if (isValidScores(Scores)) {
         const scoresArray = Scores.split(',').map(Number);
         io.to(sqid).emit('UpdateScores', scoresArray);
       }
-      // Emit active set
-      if ([0,1,2].includes(ActiveSet)) {
+      // Emit active set (validate against match length)
+      if (isValidSetIndex(ActiveSet, matchLength)) {
         io.to(sqid).emit('UpdateActiveSet', ActiveSet);
+      }
+      // Emit match length
+      if (isValidMatchLength(matchLength)) {
+        io.to(sqid).emit('UpdateMatchLength', matchLength);
       }
       // Emit team info
       io.to(sqid).emit('UpdateTeamInfo', {
@@ -266,11 +295,41 @@ io.on('connection', (socket) => {
   });
 
   socket.on('UpdateActiveSet', (payload) => {
-    if (!isValidSqid(payload.sqid) || !isValidSetIndex(payload.setIndex)) {
+    if (!isValidSqid(payload.sqid)) {
       socket.emit('error', { error: 'Invalid payload for UpdateActiveSet' });
       return;
     }
-    io.to(payload.sqid).emit('UpdateActiveSet', payload.setIndex);
+    
+    // Get the scoreboard to validate set index against match length
+    const id = sqids.decode(payload.sqid)[0];
+    if (!id) {
+      socket.emit('error', { error: 'Invalid Sqid for UpdateActiveSet' });
+      return;
+    }
+    
+    db.get('SELECT MatchLength FROM scoreboards WHERE ScoreboardId = ?', [id], (err, row) => {
+      if (err || !row) {
+        socket.emit('error', { error: 'Could not validate set index' });
+        return;
+      }
+      
+      const matchLength = row.MatchLength || 3; // Default to 3 for backward compatibility
+      if (!isValidSetIndex(payload.setIndex, matchLength)) {
+        socket.emit('error', { error: 'Invalid payload for UpdateActiveSet' });
+        return;
+      }
+      
+      io.to(payload.sqid).emit('UpdateActiveSet', payload.setIndex);
+    });
+  });
+
+  socket.on('UpdateMatchLength', (payload) => {
+    if (!isValidSqid(payload.sqid) || !isValidMatchLength(payload.matchLength)) {
+      socket.emit('error', { error: 'Invalid payload for UpdateMatchLength' });
+      return;
+    }
+    const { sqid, matchLength } = payload;
+    io.to(sqid).emit('UpdateMatchLength', matchLength);
   });
 });
 
